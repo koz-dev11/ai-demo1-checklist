@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: チェック付きメモリスト - React + Python Lambda + API Gateway + DynamoDB
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.14
+    Architectures:
+      - x86_64
+    MemorySize: 256
+
+Resources:
+  MemosHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - Content-Type
+        AllowMethods:
+          - GET
+          - POST
+          - PATCH
+          - DELETE
+          - OPTIONS
+
+  MemosTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: id
+        Type: String
+      TableName: Memos
+
+  MemosFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-memos'
+      CodeUri: backend/
+      Handler: main.handler
+      Description: Memos API
+      Environment:
+        Variables:
+          MEMOS_TABLE: !Ref MemosTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MemosTable
+      Events:
+        MemosList:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MemosHttpApi
+            Path: /api/memos
+            Method: GET
+        MemosCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MemosHttpApi
+            Path: /api/memos
+            Method: POST
+        MemosGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MemosHttpApi
+            Path: /api/memos/{id}
+            Method: GET
+        MemosPatch:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MemosHttpApi
+            Path: /api/memos/{id}
+            Method: PATCH
+        MemosDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MemosHttpApi
+            Path: /api/memos/{id}
+            Method: DELETE
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-frontend-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}'
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-frontend-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+Outputs:
+  ApiUrl:
+    Description: API base URL
+    Value: !Sub 'https://${MemosHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  MemosEndpoint:
+    Description: GET/POST /api/memos
+    Value: !Sub 'https://${MemosHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/api/memos'
+  MemosTableName:
+    Description: DynamoDB table for memos
+    Value: !Ref MemosTable
+  FrontendBucketName:
+    Description: S3 bucket for React build
+    Value: !Ref FrontendBucket
+  FrontendUrl:
+    Description: CloudFront URL
+    Value: !Sub 'https://${FrontendDistribution.DomainName}'
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (for cache invalidation)
+    Value: !Ref FrontendDistribution
